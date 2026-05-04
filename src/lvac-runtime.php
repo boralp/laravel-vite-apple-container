@@ -6,44 +6,34 @@ declare(strict_types=1);
 /**
  * Laravel Vite Build in Apple Container
  *
- * Enterprise-grade local asset build wrapper for Laravel + Vite.
- *
  * Target runtime:
  *   - github.com/apple/container
  *   - CLI binary: container
  *
- * Default security posture:
- *   - No shell execution
- *   - Apple `container` CLI only
- *   - Project mounted read-only
- *   - Only public/build writable on the host
- *   - node_modules stored in an isolated named container volume
- *   - Container root filesystem read-only
- *   - Temporary writable locations are tmpfs
+ * Main fix:
+ *   - Do not mount the named volume directly at /app/node_modules.
+ *   - Mount it at /mnt/node_modules_volume instead.
+ *   - Use /mnt/node_modules_volume/node_modules as the real node_modules path.
+ *   - Symlink /work/app/node_modules or /app/node_modules to that child path.
+ *
+ * Why:
+ *   Apple/container-created Linux volumes may contain a root-owned lost+found
+ *   directory at the volume root. npm ci tries to clean node_modules and fails
+ *   when node_modules is the volume root.
+ *
+ * Security posture:
+ *   - Project mounted read-only by default
+ *   - public/build writable on the host
+ *   - node_modules isolated in a named container volume
  *   - Network disabled by default
  *   - npm lifecycle scripts disabled by default
- *   - Non-root execution by default
- *   - CPU and memory limits enabled
+ *   - Container root filesystem read-only
+ *   - Temporary writable locations are tmpfs
  *
- * Usage:
- *   php bin/build.php
- *
- * Common flags:
- *   --allow-network       Allow network access inside the container
- *   --allow-scripts       Allow npm lifecycle scripts during npm ci
- *   --full-access         Mount the whole Laravel project writable
- *   --host-node-modules   Use host node_modules instead of isolated volume
- *   --build-only          Run only npm run build
- *   --ci-only             Run only npm ci
- *   --root                Run as root inside the container
- *   --paranoid            Add extra hardening where Apple container supports it
- *
- * Notes:
- *   - Default mode is intentionally restrictive.
- *   - First-time `npm ci` usually needs --allow-network unless dependencies are
- *     already cached in the image or available from the container runtime cache.
- *   - `npm run build` still executes arbitrary project code. This wrapper limits
- *     filesystem and network exposure; it does not make untrusted JavaScript safe.
+ * Note:
+ *   In default isolated-volume mode, the container runs as root so it can create
+ *   and manage the named volume contents. The project source remains read-only
+ *   and only public/build is writable on the host.
  */
 const EXIT_USAGE = 64;
 const EXIT_SOFTWARE = 70;
@@ -90,10 +80,6 @@ if ($hostNodeModules && ! $fullAccess) {
     fail('--host-node-modules requires --full-access because /app is read-only in default mode.', EXIT_USAGE);
 }
 
-/**
- * Apple container is the intended runtime.
- * Keep this configurable only for wrapper paths, not for Docker/Podman support.
- */
 $containerCmd = getenv('CONTAINER_CLI') ?: 'container';
 
 if (! detectAppleContainer($containerCmd)) {
@@ -110,8 +96,6 @@ if (! detectAppleContainer($containerCmd)) {
  * Update intentionally:
  *   container image pull docker.io/library/node:24-alpine
  *   container image inspect docker.io/library/node:24-alpine
- *
- * Replace the digest only after reviewing the new image.
  */
 $nodeImage = 'docker.io/library/node:24-alpine@sha256:d1b3b4da11eefd5941e7f0b9cf17783fc99d9c6fc34884a665f40a06dbdfc94f';
 
@@ -125,10 +109,6 @@ if (! is_writable($buildDir)) {
     fail('public/build exists but is not writable by the current user.', EXIT_USAGE);
 }
 
-/**
- * Apple `container --mount` uses comma-separated key=value syntax.
- * A comma in a host path would be ambiguous.
- */
 if (! $fullAccess && str_contains($root, ',')) {
     fail('Project path contains a comma, which is unsafe for container --mount syntax.', EXIT_USAGE);
 }
@@ -136,7 +116,19 @@ if (! $fullAccess && str_contains($root, ',')) {
 $projectHash = substr(sha1($root), 0, 20);
 $nodeModulesVolume = 'laravel_node_modules_'.$projectHash;
 
-$userSpec = getContainerUserSpec($runAsRoot);
+/**
+ * In default mode, node_modules is isolated in a named container volume.
+ * Run as root in that case so the script can create/manage the volume child
+ * directory even when the volume root is owned by root.
+ *
+ * In full-access or host-node-modules mode, preserve the host UID/GID unless
+ * --root is explicitly passed.
+ */
+$userSpec = (! $fullAccess && ! $hostNodeModules)
+    ? null
+    : getContainerUserSpec($runAsRoot);
+
+$workdir = $fullAccess ? '/app' : '/work/app';
 
 $base = [
     $containerCmd,
@@ -146,7 +138,7 @@ $base = [
     '--read-only',
     '--tmpfs', '/tmp',
     '--tmpfs', '/home/node/.npm',
-    '--workdir', '/app',
+    '--workdir', $workdir,
     '--memory', '2g',
     '--cpus', '2',
     '--env', 'HOME=/tmp',
@@ -155,11 +147,6 @@ $base = [
     '--env', 'CI=true',
 ];
 
-/**
- * Apple container supports `--network none` in current releases.
- * Defaulting to no network is intentional: install/build code should not be
- * able to exfiltrate data unless the caller opts in.
- */
 if (! $allowNetwork) {
     $base[] = '--network';
     $base[] = 'none';
@@ -170,10 +157,6 @@ if ($userSpec !== null) {
     $base[] = $userSpec;
 }
 
-/**
- * Apple container supports Linux capability control.
- * Avoid Docker-only flags here.
- */
 if ($paranoid) {
     $base[] = '--cap-drop';
     $base[] = 'ALL';
@@ -182,16 +165,17 @@ if ($paranoid) {
 /**
  * Filesystem model:
  *
- * Default:
- *   /app                    read-only project source
- *   /app/public/build        writable host build output
- *   /app/node_modules        isolated named container volume
+ * Default mode:
+ *   /src                       read-only project source
+ *   /work                      tmpfs writable working area
+ *   /work/app                  writable copy of project
+ *   /mnt/public_build          writable host public/build
+ *   /mnt/node_modules_volume   isolated named volume
+ *   /work/app/node_modules     symlink to volume child directory
  *
- * Full access:
- *   /app                    writable project source
- *
- * The default prevents npm/build scripts from modifying application source,
- * PHP code, config files, package files, or other project files.
+ * Full-access mode:
+ *   /app                       writable project source
+ *   /mnt/node_modules_volume   isolated named volume unless host node_modules
  */
 if ($fullAccess) {
     $base[] = '--volume';
@@ -199,68 +183,121 @@ if ($fullAccess) {
 
     if (! $hostNodeModules) {
         $base[] = '--volume';
-        $base[] = $nodeModulesVolume.':/app/node_modules';
+        $base[] = $nodeModulesVolume.':/mnt/node_modules_volume';
     }
 } else {
     $base[] = '--mount';
-    $base[] = 'type=bind,source='.$root.',target=/app,readonly';
+    $base[] = 'type=bind,source='.$root.',target=/src,readonly';
 
     $base[] = '--mount';
-    $base[] = 'type=bind,source='.$buildDir.',target=/app/public/build';
+    $base[] = 'type=bind,source='.$buildDir.',target=/mnt/public_build';
 
     $base[] = '--volume';
-    $base[] = $nodeModulesVolume.':/app/node_modules';
+    $base[] = $nodeModulesVolume.':/mnt/node_modules_volume';
+
+    $base[] = '--tmpfs';
+    $base[] = '/work';
 }
 
-/**
- * Run npm ci.
- */
-if (! $buildOnly) {
-    $npmCi = ['npm', 'ci'];
+$insideScript = buildInsideScript(
+    fullAccess: $fullAccess,
+    hostNodeModules: $hostNodeModules,
+    allowScripts: $allowScripts,
+    buildOnly: $buildOnly,
+    ciOnly: $ciOnly
+);
 
-    if (! $allowScripts) {
-        $npmCi[] = '--ignore-scripts';
-    }
+run(buildContainerCommand($base, $nodeImage, ['sh', '-eu', '-c', $insideScript]));
 
-    logLine('Installing dependencies...');
-    run(buildContainerCommand($base, $nodeImage, $npmCi));
-    logLine('Dependencies installed.');
-    logLine('');
+$files = glob($buildDir.'/*');
+
+if (! $ciOnly && (! is_array($files) || count($files) === 0)) {
+    fail('Build finished, but public/build is empty.', EXIT_SOFTWARE);
 }
 
-/**
- * Run npm build.
- */
 if (! $ciOnly) {
-    logLine('Building Laravel Vite assets...');
-    run(buildContainerCommand($base, $nodeImage, ['npm', 'run', 'build']));
-
-    $files = glob($buildDir.'/*');
-
-    if (! is_array($files) || count($files) === 0) {
-        fail('Build finished, but public/build is empty.', EXIT_SOFTWARE);
-    }
-
     logLine('');
     logLine('Build complete: public/build');
 }
 
 exit(0);
 
-/**
- * Compose final Apple container command.
- *
- * `container run` format:
- *   container run [options] <image> [arguments...]
- */
 function buildContainerCommand(array $base, string $image, array $processArgs): array
 {
     return array_merge($base, [$image], $processArgs);
 }
 
-/**
- * Execute command without shell interpolation.
- */
+function buildInsideScript(
+    bool $fullAccess,
+    bool $hostNodeModules,
+    bool $allowScripts,
+    bool $buildOnly,
+    bool $ciOnly
+): string {
+    $script = <<<'SH'
+if [ -d /src ]; then
+    mkdir -p /work/app
+
+    tar \
+        --exclude='./node_modules' \
+        --exclude='./public/build' \
+        -C /src \
+        -cf - . | tar -C /work/app -xf -
+
+    mkdir -p /work/app/public
+    rm -rf /work/app/public/build
+    ln -s /mnt/public_build /work/app/public/build
+
+    mkdir -p /mnt/node_modules_volume/node_modules
+
+    if [ -d /mnt/node_modules_volume/node_modules/.bin ]; then
+        echo 'Restoring node_modules from container volume...'
+        cp -a /mnt/node_modules_volume/node_modules /work/app/node_modules
+    fi
+
+    cd /work/app
+else
+    cd /app
+fi
+
+SH;
+
+    if ($fullAccess && ! $hostNodeModules) {
+        $script .= <<<'SH'
+mkdir -p /mnt/node_modules_volume/node_modules
+
+if [ -d /mnt/node_modules_volume/node_modules/.bin ]; then
+    rm -rf /app/node_modules
+    cp -a /mnt/node_modules_volume/node_modules /app/node_modules
+fi
+
+SH;
+    }
+
+    if (! $buildOnly) {
+        $npmCi = 'npm ci';
+
+        if (! $allowScripts) {
+            $npmCi .= ' --ignore-scripts';
+        }
+
+        $script .= "echo 'Installing dependencies...'\n";
+        $script .= $npmCi."\n";
+        $script .= "rm -rf /mnt/node_modules_volume/node_modules\n";
+        $script .= "mkdir -p /mnt/node_modules_volume\n";
+        $script .= "cp -a node_modules /mnt/node_modules_volume/node_modules\n";
+        $script .= "echo 'Dependencies installed.'\n";
+        $script .= "echo ''\n";
+    }
+
+    if (! $ciOnly) {
+        $script .= "echo 'Building Laravel Vite assets...'\n";
+        $script .= "npm run build\n";
+    }
+
+    return $script;
+}
+
 function run(array $cmd): void
 {
     $descriptors = [
@@ -282,14 +319,6 @@ function run(array $cmd): void
     }
 }
 
-/**
- * Detect Apple container without shell execution.
- *
- * Accepts:
- *   container
- *   /usr/local/bin/container
- *   /opt/homebrew/bin/container
- */
 function detectAppleContainer(string $cmd): bool
 {
     if ($cmd === '') {
@@ -320,9 +349,6 @@ function detectAppleContainer(string $cmd): bool
     return false;
 }
 
-/**
- * Run `container --version` directly.
- */
 function canRunContainerVersion(string $cmd): bool
 {
     $descriptors = [
@@ -344,10 +370,6 @@ function canRunContainerVersion(string $cmd): bool
     return proc_close($proc) === 0;
 }
 
-/**
- * Prefer host UID:GID on Unix so host-mounted public/build remains writable.
- * Fall back to the image's `node` user if POSIX functions are unavailable.
- */
 function getContainerUserSpec(bool $runAsRoot): ?string
 {
     if ($runAsRoot) {
@@ -388,6 +410,7 @@ function printHelp(): void
 Laravel Vite Build in Apple Container
 
 Usage:
+  ./vendor/bin/lvac [flags]
   php bin/build.php [flags]
 
 Flags:
@@ -408,12 +431,14 @@ Default behavior:
   - Network is disabled
   - npm lifecycle scripts are disabled
   - Container root filesystem is read-only
+  - Container runs as root only for isolated-volume compatibility
 
 Examples:
-  php bin/build.php --allow-network
-  php bin/build.php --allow-network --allow-scripts
-  php bin/build.php --build-only
-  php bin/build.php --full-access --allow-network
+  ./vendor/bin/lvac --allow-network
+  ./vendor/bin/lvac --allow-network --allow-scripts
+  ./vendor/bin/lvac --build-only
+  ./vendor/bin/lvac --full-access --allow-network
+  ./vendor/bin/lvac --full-access --host-node-modules --allow-network
 
 TXT;
 
