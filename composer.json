@@ -1,0 +1,62 @@
+{
+  "name": "boralp/laravel-vite-apple-container",
+  "description": "Build Laravel Vite assets inside a hardened Apple Container.",
+  "type": "library",
+  "keywords": [
+    "laravel",
+    "vite",
+    "apple-container",
+    "container",
+    "frontend",
+    "assets",
+    "npm",
+    "security"
+  ],
+  "homepage": "https://github.com/boralp/laravel-vite-apple-container",
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "boralp",
+      "homepage": "https://github.com/boralp",
+      "role": "Developer"
+    }
+  ],
+  "require": {
+    "php": "^8.2",
+    "illuminate/support": "^10.0|^11.0|^12.0"
+  },
+  "require-dev": {
+    "laravel/pint": "^1.29",
+    "orchestra/testbench": "^8.0|^9.0|^10.0",
+    "phpunit/phpunit": "^10.5|^11.0|^12.0"
+  },
+  "autoload": {
+    "psr-4": {
+      "Boralp\\LaravelViteAppleContainer\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Boralp\\LaravelViteAppleContainer\\Tests\\": "tests/"
+    }
+  },
+  "bin": [
+    "bin/lvac"
+  ],
+  "extra": {
+    "laravel": {
+      "providers": [
+        "Boralp\\LaravelViteAppleContainer\\LaravelViteAppleContainerServiceProvider"
+      ]
+    }
+  },
+  "config": {
+    "sort-packages": true
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true,
+  "scripts": {
+    "format": "vendor/bin/pint",
+    "test": "vendor/bin/phpunit"
+  }
+}

@@ -1,0 +1,13 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+/**
+ * Laravel Vite Build in Apple Container
+ *
+ * This file is installed by Composer as:
+ *
+ *   ./vendor/bin/lvac
+ */
+
+require __DIR__ . '/../src/lvac-runtime.php';
