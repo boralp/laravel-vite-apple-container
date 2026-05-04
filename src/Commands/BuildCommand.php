@@ -20,7 +20,7 @@ final class BuildCommand extends Command
         {--paranoid : Drop all Linux capabilities where supported}
         {--high-security : Alias for --paranoid}';
 
-    protected $description = 'Build Laravel Vite assets inside a hardened Apple Container.';
+    protected $description = 'Build Laravel Vite assets inside a hardened Apple Container. Use --allow-network for dependency install or --build-only for cached builds.';
 
     public function handle(): int
     {
@@ -114,6 +114,18 @@ final class BuildCommand extends Command
         $ciOnly = (bool) $this->option('ci-only');
         $runAsRoot = (bool) $this->option('root');
         $paranoid = (bool) $this->option('paranoid') || (bool) $this->option('high-security');
+
+        if (! $allowNetwork && ! $buildOnly) {
+            $this->warn('Network is disabled, but this command would run npm ci.');
+            $this->line('');
+            $this->line('Use one of these instead:');
+            $this->line('  php artisan lvac:build --allow-network       First run or after package-lock.json changes');
+            $this->line('  php artisan lvac:build --build-only          Build from cached node_modules');
+            $this->line('  php artisan lvac:build --ci-only --allow-network  Install dependencies only');
+            $this->line('');
+
+            return self::FAILURE;
+        }
 
         if (! $fullAccess && str_contains($root, ',')) {
             $this->error('Project path contains a comma, which is unsafe for container --mount syntax.');

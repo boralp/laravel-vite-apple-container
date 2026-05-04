@@ -165,6 +165,8 @@ php artisan lvac:build
 
 All flags are supported by both forms.
 
+Running the command without flags does not start a build. Because network access is disabled by default, a no-flag run would otherwise attempt npm ci without registry access. Instead, the command exits with guidance.
+
 ## Regular Usage
 
 First run, usually with npm registry access:
