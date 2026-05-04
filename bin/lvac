@@ -1,13 +1,42 @@
 #!/usr/bin/env php
 <?php
+
 declare(strict_types=1);
 
-/**
- * Laravel Vite Build in Apple Container
- *
- * This file is installed by Composer as:
- *
- *   ./vendor/bin/lvac
- */
+$argv = $_SERVER['argv'] ?? [];
+$help = in_array('--help', $argv, true) || in_array('-h', $argv, true);
 
-require __DIR__ . '/../src/lvac-runtime.php';
+$root = realpath(getcwd());
+
+if (! $root || ! is_dir($root)) {
+    fwrite(STDERR, "Error: Cannot resolve current working directory.\n");
+    exit(64);
+}
+
+if (! is_file($root.'/artisan')) {
+    fwrite(STDERR, "Error: Run this command from the Laravel project root. Missing: artisan\n");
+    exit(64);
+}
+
+$args = array_slice($argv, 1);
+
+$cmd = array_merge([
+    PHP_BINARY,
+    $root.'/artisan',
+    'lvac:build',
+], $args);
+
+$descriptors = [
+    0 => STDIN,
+    1 => STDOUT,
+    2 => STDERR,
+];
+
+$process = proc_open($cmd, $descriptors, $pipes, $root);
+
+if (! is_resource($process)) {
+    fwrite(STDERR, "Error: Failed to start Artisan.\n");
+    exit(70);
+}
+
+exit(proc_close($process));

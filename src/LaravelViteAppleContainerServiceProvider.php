@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Boralp\LaravelViteAppleContainer;
 
+use Boralp\LaravelViteAppleContainer\Commands\BuildCommand;
 use Illuminate\Support\ServiceProvider;
 
 final class LaravelViteAppleContainerServiceProvider extends ServiceProvider
@@ -18,8 +19,14 @@ final class LaravelViteAppleContainerServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
-        $this->publishes([
-            __DIR__.'/../config/lvac.php' => config_path('lvac.php'),
-        ], 'lvac-config');
+        if ($this->app->runningInConsole()) {
+            $this->commands([
+                BuildCommand::class,
+            ]);
+
+            $this->publishes([
+                __DIR__.'/../config/lvac.php' => config_path('lvac.php'),
+            ], 'lvac-config');
+        }
     }
 }
