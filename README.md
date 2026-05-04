@@ -2,7 +2,7 @@
 
 Build Laravel Vite frontend assets inside an isolated Apple Container.
 
-This tool is designed for macOS users who use [`github.com/apple/container`](https://github.com/apple/container). It runs `npm ci` and `npm run build` in a hardened container with restricted filesystem access, disabled network access by default, and npm lifecycle scripts disabled by default.
+This package is designed for macOS users who use [`github.com/apple/container`](https://github.com/apple/container). It runs `npm ci` and `npm run build` in a hardened container with restricted filesystem access, disabled network access by default, and npm lifecycle scripts disabled by default.
 
 ## Installation
 
@@ -10,14 +10,15 @@ Install via Composer:
 
 ```bash
 composer require boralp/laravel-vite-apple-container --dev
+````
 
 ## Quick Start
 
 From your Laravel project root:
 
 ```bash
-./vendor/bin/lvac
-````
+./vendor/bin/lvac --allow-network
+```
 
 Your compiled CSS and JavaScript assets will be written to:
 
@@ -26,6 +27,12 @@ public/build/
 ```
 
 By default, the project source is mounted read-only. Only `public/build` is writable on the host.
+
+After dependencies have been installed once, subsequent builds can usually run without network access:
+
+```bash
+./vendor/bin/lvac --build-only
+```
 
 ## Requirements
 
@@ -48,17 +55,19 @@ The command runs the Laravel frontend build inside Apple Container using a pinne
 
 Default container behavior:
 
-| Feature               |                   Default | Purpose                                            |
-| --------------------- | ------------------------: | -------------------------------------------------- |
-| Project filesystem    |                 Read-only | Prevents build scripts from modifying source files |
-| `public/build`        |                  Writable | Allows Vite output                                 |
-| `node_modules`        | Isolated container volume | Avoids writing dependencies into the host project  |
-| Network               |                  Disabled | Blocks exfiltration and unexpected remote fetches  |
-| npm lifecycle scripts |                  Disabled | Blocks install-time hooks such as `postinstall`    |
-| Container user        |                  Non-root | Reduces privilege risk                             |
-| Root filesystem       |                 Read-only | Limits writable paths inside the container         |
-| Temporary storage     |                     tmpfs | Provides controlled writable scratch space         |
-| CPU / memory          |                   Limited | Reduces accidental resource exhaustion             |
+| Feature               |                      Default | Purpose                                                          |
+| --------------------- | ---------------------------: | ---------------------------------------------------------------- |
+| Project filesystem    |                    Read-only | Prevents build scripts from modifying source files               |
+| `public/build`        |                     Writable | Allows Vite output                                               |
+| `node_modules`        |    Isolated container volume | Avoids writing dependencies into the host project                |
+| Network               |                     Disabled | Blocks exfiltration and unexpected remote fetches                |
+| npm lifecycle scripts |                     Disabled | Blocks install-time hooks such as `postinstall`                  |
+| Container user        | Root in isolated-volume mode | Allows the container to manage the private `node_modules` volume |
+| Root filesystem       |                    Read-only | Limits writable paths inside the container                       |
+| Temporary storage     |                        tmpfs | Provides controlled writable scratch space                       |
+| CPU / memory          |                      Limited | Reduces accidental resource exhaustion                           |
+
+The project source remains read-only in default mode even when the container runs as root. The only host path mounted writable is `public/build`.
 
 ## Regular Usage
 
@@ -86,6 +95,12 @@ Build assets only:
 ./vendor/bin/lvac --build-only
 ```
 
+Allow lifecycle scripts during install:
+
+```bash
+./vendor/bin/lvac --allow-network --allow-scripts
+```
+
 ## Flags
 
 | Flag                  | Description                                         |
@@ -111,9 +126,11 @@ By default, the script protects against common npm supply-chain and build-time r
 * Prevents writes to application source files
 * Allows writes only to `public/build`
 * Keeps `node_modules` in an isolated container volume
-* Runs without root privileges
 * Uses a read-only container root filesystem
-* Avoids shell interpolation entirely
+* Uses tmpfs for temporary writable locations
+* Avoids host shell interpolation
+
+In default isolated-volume mode, the process may run as root inside the container so it can manage the private named volume used for `node_modules`. This does not make the project source writable; the project is still copied from a read-only mount into a temporary working directory.
 
 ### Important Limitations
 
@@ -172,6 +189,7 @@ container image inspect docker.io/library/node:24-alpine
 
 Review the new digest, then update the image reference in the script.
 
+## Troubleshooting
 
 ### `Apple container CLI not found or not executable`
 
@@ -187,9 +205,9 @@ If the binary is in a custom location:
 CONTAINER_CLI=/path/to/container ./vendor/bin/lvac
 ```
 
-### `container system start`
+### Apple Container is installed but not running
 
-If Apple Container is installed but not running:
+Start the container system:
 
 ```bash
 container system start
@@ -212,6 +230,22 @@ Run:
 ```
 
 Then build without network:
+
+```bash
+./vendor/bin/lvac --build-only
+```
+
+### `vite: not found`
+
+This usually means dependencies have not been installed into the isolated `node_modules` volume yet.
+
+Run:
+
+```bash
+./vendor/bin/lvac --allow-network
+```
+
+After that, build-only mode should work:
 
 ```bash
 ./vendor/bin/lvac --build-only
@@ -289,7 +323,6 @@ For trusted projects only:
 | `public/build` writes   |         Allowed |                        Allowed |
 | `node_modules` location |    Host project |      Isolated container volume |
 | Root filesystem         | Host filesystem | Read-only container filesystem |
-| User                    |       Host user |        Non-root container user |
 | Runtime consistency     | Depends on host |                 OCI Node image |
 
 ## CI/CD
