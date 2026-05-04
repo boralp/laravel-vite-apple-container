@@ -37,7 +37,7 @@ After dependencies have been installed once, subsequent builds can usually run w
 ## Requirements
 
 * macOS with Apple Container installed
-* PHP 8.1+
+* Laravel 12.x || Laravel 13.x
 * Laravel project with:
 
   * `artisan`
